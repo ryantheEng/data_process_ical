@@ -35,6 +35,8 @@ class IcalParser:
         else:
             self.month = month
 
+        self.inv_date = date(self.year, self.month,1)
+
         # load object data
         self.cal = self.load_ical()
         self.client_data = self.load_client_dict()
@@ -118,7 +120,7 @@ class IcalParser:
         for component in non_filtered_cal.walk():
             if component.get('RRULE'):
                 if 'UNTIL' in component['RRULE']:
-                    if component['RRULE']['UNTIL'][0].month == self.month and component['RRULE']['UNTIL'][0].year == self.year:
+                    if component['RRULE']['UNTIL'][0].date() >= self.inv_date.date():
                         client_id_cal_recurring_filtered.add_component(component)
                         self.logger.debug(f'Found:Recurring: {component.get('Summary')}')
                 else:
@@ -225,6 +227,11 @@ class IcalParser:
                         all_hours.append(duration.seconds / 3600)
 
         return all_dates, all_hours
+    
+    def check_parking(self,component):
+        if component.get('Summary') and 'park' in component.get('Summary').lower():
+            return True
+        return False
     
     def sort_data(self,dates,hours):
         # sort data by date
