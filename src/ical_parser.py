@@ -14,16 +14,6 @@ class IcalParser:
         self.ical_path = ical_path
         self.client_list_path = client_list_path
 
-        if logger is None:
-            self.logger = logging.getLogger(__name__)
-            self.logger.setLevel(logger_level)
-            handler = logging.StreamHandler()
-            formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-            handler.setFormatter(formatter)
-            self.logger.addHandler(handler)
-        else:
-            self.logger = logger
-
         # datetime objects
         self.year = date.today().year
 
@@ -41,6 +31,18 @@ class IcalParser:
         self.cal = self.load_ical()
         self.client_data = self.load_client_dict()
         self.cal = self.filter_master_calendar()
+
+        if logger is None:
+            self.logger = logging.getLogger(__name__)
+            self.logger.setLevel(logger_level)
+            if not self.logger.handlers:  # Avoid adding duplicate handlers
+                handler = logging.StreamHandler()
+                formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+                handler.setFormatter(formatter)
+                self.logger.addHandler(handler)
+            self.logger.propagate = False  # Disable propagation to the root logger
+        else:
+            self.logger = logger
 
         return
 
@@ -146,11 +148,17 @@ class IcalParser:
 
     def get_recur_info(self,recur_cal):
 
-        all_dates = []
-        all_hours = []
+        recur_data = []
+        data_empty = {
+            'date': None,
+            'hours': None,
+            'parking': False
+        }
 
         for event in recur_cal.events:
             # get the days of the week that the event takes place on
+            if event.get('dtstart').dt > self.inv_date.astimezone()+timedelta(weeks=4):
+                continue
             if 'RRULE' in event:
                 # Get day of week from start date
                 start_date = event.get('dtstart').dt
@@ -160,33 +168,48 @@ class IcalParser:
                 # Get duration/hours from event
                 duration = event.get('duration')
 
-                # get the dates of the weekday that corresponds with the month,year
-                # Get first day of the month
-                first_day = date(self.year, self.month, 1)
-
-                # Find first occurrence of the weekday
-                days_ahead = weekday - first_day.weekday()
-                if days_ahead <= 0:
-                    days_ahead += 7
-                first_occurrence = first_day + timedelta(days=days_ahead)
+                # check frequency rule
+                interval = 1
+                if 'FREQ' in event['RRULE']:
+                    if event['RRULE']['FREQ'][0] != 'WEEKLY':
+                        self.logger.warning(f'Only Weekly Recurring Events Supported: {event.get('Summary')}')
+                        continue
+                    if 'INTERVAL' in event['RRULE']:
+                        interval = event['RRULE']['INTERVAL'][0]
+                
+                # get first event of month based on interval
+                # Find how many weeks since the first event to this month's first day
+                weeks_diff = ((date(self.inv_date.year, self.inv_date.month, 1) - start_date).days // 7)
+                # Adjust for the interval by finding how many complete intervals have passed
+                intervals_passed = weeks_diff // interval
+                # Calculate the first event of this month by adding the complete intervals
+                first_event = start_date + timedelta(weeks=intervals_passed * interval)
+                # If first_event is before the month starts, add one more interval
+                if first_event < (date(self.inv_date.year, self.inv_date.month, 1)):
+                    first_event = start_date + timedelta(weeks=(intervals_passed + 1) * interval)
 
                 # Get all occurrences in the month
-                current_date = first_occurrence
-
-                dates = []
-                hours = []
+                current_date = first_event
 
                 while current_date.month == self.month:
-                    dates.append(current_date)
-                    if not isinstance(duration, timedelta):
-                        start_time = event.get('dtstart').dt
-                        end_time = event.get('dtend').dt
-                        duration = end_time - start_time
-                    hours.append(duration.seconds / 3600)  # Convert seconds to hours
-                    current_date += timedelta(days=7)
+                    if current_date in [item['date'] for item in recur_data]:
+                        pass
+                    else:
+                        recur_data.append(data_empty.copy())
+                        recur_data[-1]['date'] = current_date   
+                        self.logger.debug(f'Added Recurring: {current_date}')
+                        if not isinstance(duration, timedelta):
+                            start_time = event.get('dtstart').dt
+                            end_time = event.get('dtend').dt
+                            duration = end_time - start_time
+                        recur_data[-1]['hours'] = (duration.seconds / 3600)  # Convert seconds to hours
+                        if self.check_parking(event):
+                            recur_data[-1]['parking'] = True
+                    current_date += timedelta(weeks=interval)
 
                 # check the exdates
                 if 'EXDATE' in event:
+                    dates = [item['date'] for item in recur_data]
                     exdates = event['EXDATE']
                     if not hasattr(exdates, '__iter__'):
                         exdates = [exdates]
@@ -195,17 +218,22 @@ class IcalParser:
                         if exdate.dts[0].dt.date() in dates:
                             index = dates.index(exdate.dts[0].dt.date())
                             self.logger.debug(f'Removed:Recurring:{exdate.dts[0].dt.date()}')
+                            recur_data.pop(index)
                             dates.pop(index)
-                            hours.pop(index)
-                
-                all_dates+=dates
-                all_hours+=hours
 
-        return all_dates, all_hours
+        return recur_data
 
     def get_non_recur_info(self,non_recur_cal,recur_data_dates):
+        recur_data = []
+        data_empty = {
+            'date': None,
+            'hours': None,
+            'parking': False
+        }
+        if not isinstance(recur_data_dates, list):
+            recur_data_dates = [recur_data_dates]
+        recur_data_dates_ = [item['date'] for item in recur_data_dates]
         all_dates = []
-        all_hours = []
 
         for event in non_recur_cal.events:
             # get the days of the week that the event takes place on
@@ -215,44 +243,56 @@ class IcalParser:
                 if isinstance(start_date, datetime):
                     start_date = start_date.date()
                 # see if exists in recur_data_dates
-                if start_date in recur_data_dates:
-                    continue
+                if start_date in recur_data_dates_:
+                    pass
                 elif start_date in all_dates:
-                    continue
+                    pass
                 else:
                     all_dates.append(start_date)
+                    recur_data.append(data_empty.copy())
+                    self.logger.debug(f'Added NonRecurring: {start_date}')
+                    recur_data[-1]['date'] = start_date
                     if 'DTEND' in event:
                         end_date = event.get('dtend').dt
                         duration = end_date - event.get('dtstart').dt
-                        all_hours.append(duration.seconds / 3600)
+                        recur_data[-1]['hours'] = (duration.seconds / 3600)
 
-        return all_dates, all_hours
+                    if self.check_parking(event):
+                        recur_data[-1]['parking'] = True
+                        continue
+                    
+                if self.check_parking(event):
+                    date_to_match = start_date
+                    for item in recur_data_dates:
+                        if item['date'] == date_to_match:
+                            item['parking'] = True
+                            break
+
+        return recur_data
     
     def check_parking(self,component):
         if component.get('Summary') and 'park' in component.get('Summary').lower():
+            self.logger.debug(f'Parking Found: {component.get('Summary')}')
             return True
         return False
     
-    def sort_data(self,dates,hours):
+    def sort_data(self,data):
         # sort data by date
-        data = list(zip(dates,hours))
-        data.sort(key=lambda x: x[0])
-        dates,hours = zip(*data)
-        return dates,hours
+        return sorted(data, key=lambda x: x['date'])
     
     def calculate_hours_and_dates(self,client_name):
         self.logger.info(f'Parsing Data for {client_name}')
         non_recur,recur = self.filter_client_calendar(client_name)
 
         recur_data = self.get_recur_info(recur)
-        non_recur_data = self.get_non_recur_info(non_recur,recur_data[0])
+        non_recur_data = self.get_non_recur_info(non_recur,recur_data)
 
-        all_dates_data = recur_data[0] + non_recur_data[0]
-        all_hours_data = recur_data[1] + non_recur_data[1]
+        all_data = recur_data + non_recur_data
+        all_data = self.sort_data(all_data)
 
-        data = self.sort_data(all_dates_data,all_hours_data)
+        return all_data
 
-        return list(data[0]),list(data[1])
+
     
 # testing
 if __name__ == '__main__':

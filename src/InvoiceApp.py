@@ -7,22 +7,27 @@ class InvoiceApp(IcalParser, MarkdownCreator):
                  mydatafp="src/my_info/my_info.json"):
         self.logger = logging.getLogger(__name__)
         self.logger.setLevel(logger_level)
-        handler = logging.StreamHandler()
-        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-        handler.setFormatter(formatter)
-        self.logger.addHandler(handler)
+        if not self.logger.handlers:  # Avoid adding duplicate handlers
+            handler = logging.StreamHandler()
+            formatter = logging.Formatter('%(asctime)s - %(filename)s - %(levelname)s - %(message)s')
+            handler.setFormatter(formatter)
+            self.logger.addHandler(handler)
+        self.logger.propagate = False  # Disable propagation to the root logger
 
+        # Pass self.logger to IcalParser
         IcalParser.__init__(self, ical_path, client_list_path, month, self.logger, logger_level)
-        MarkdownCreator.__init__(self, mydatafp, month,self.logger,logger_level)
+        MarkdownCreator.__init__(self, mydatafp, month, self.logger, logger_level)
 
     def main_loop(self):
         for key,value in self.client_data.items():
+            #debug 
+            if key == 'MLS':
+                pass
             # get hours and dates
-            dates,hours = self.calculate_hours_and_dates(key)
+            data_dict = self.calculate_hours_and_dates(key)
 
-            self.create_invoice(value,dates,hours)
-
+            self.create_invoice(value,data_dict)
 
 if __name__ == '__main__':
-    myapp = InvoiceApp()
+    myapp = InvoiceApp(month=3)
     myapp.main_loop()
